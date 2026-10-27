@@ -1,0 +1,164 @@
+---
+title: "Assignment 3: Question 1 - Brand Loyalty"
+author: "Ahmad Sfui Aziz Shah"
+format:
+  html:
+    toc: true
+    theme: cosmo
+    embed-resources: true
+  pdf:
+    toc: true
+    geometry: margin=1in
+editor: visual
+execute:
+  echo: fenced
+  warning: false
+  message: false
+---
+
+## Purpose and data
+
+The aim is to compare households by their degree of brand loyalty, measured through the concentration of purchase volume. The analysis uses the three-household example to examine Euclidean distance, then constructs and checks `MaxBrShare` for the 600 households in `bathsoap.csv`.
+
+Open `ETW2500_A3.Rproj` and render this document from a fresh R session. File paths are relative to the project root; package requirements and reproduction instructions are in `README.md`. All analysis code and outputs are shown below.
+
+```{r}
+library(tidyverse)
+library(here)
+library(gt)
+
+brand_example <- here("dataset", "brand_example.csv") |>
+  read_csv(show_col_types = FALSE)
+
+BathSoap <- here("dataset", "bathsoap.csv") |>
+  read_csv(show_col_types = FALSE)
+```
+
+## Part A: Think about the problem
+
+### 1. Compare the loyalty of X and Y
+
+Households X and Y are equally loyal in terms of their purchase shares: each allocates 100% of its purchase volume to one brand. X buys only brand A, while Y buys only brand B. Brand loyalty depends on how concentrated purchases are in a particular brand, rather than the identity of that brand. Household Z, which divides its purchases equally between two brands, is less loyal by this measure.
+
+### 2. Euclidean distances using the brand shares
+
+```{r}
+brand_example |> gt()
+
+distance_shares <- brand_example |>
+  select(BrandA, BrandB) |>
+  dist(method = "euclidean")
+
+distance_shares
+```
+
+The rows in the distance output correspond to X (1), Y (2), and Z (3). The household identifier is excluded because it is a label, not a measure of purchase behaviour.
+
+Both variables are proportions on the same scale, so distances are calculated directly from the supplied shares. Euclidean distance compares the differences in the two coordinates; it does not identify equal loyalty to different brands.
+
+For example, the distance between X and Y is $\sqrt{(1-0)^2+(0-1)^2}=\sqrt{2}$. X and Z are equally as close as Y and Z, while X and Y are the most distant pair. This does not agree with their similarity in loyalty in Item 1: X and Y are equally loyal, but the distance treats them as most different because they buy different brands.
+
+### 3. Effect of using all nine brand-share variables unchanged
+
+Using the nine brand shares unchanged makes distance-based methods compare which brands households buy and their shares. As a result, households that are equally loyal to different brands can be placed far apart, and clusters can reflect brand preference rather than degree of loyalty. Also, a high share of `BrOthers` can represent purchases spread across several small brands, so it cannot by itself establish loyalty to a single brand.
+
+## Part B: Create the variable
+
+### 4. Create MaxBrShare for each household
+
+First, check that each household has a unique ID and that the eight named brand shares have no missing values.
+
+```{r}
+BathSoap |>
+  summarise(
+    households = n(),
+    unique_IDs = n_distinct(MemberID)
+  )
+
+BathSoap |>
+  summarise(across(Br57_144:Br5, ~sum(is.na(.x))))
+```
+
+There are 600 rows and 600 unique household IDs, with no missing values in the eight named brand-share variables. Therefore, grouping by `MemberID` gives one row per group. Within each group, `max()` compares the eight named brand shares for that household only.
+
+For household $i$, the measure is $\mathrm{MaxBrShare}_i = \max(s_{i1},\ldots,s_{i8})$, where $s_{ij}$ is its share of purchase volume for named brand $j$. Grouping is essential here: without it, `max()` would return one maximum across all households and assign that same value to every row.
+
+```{r}
+BathSoap <- BathSoap |>
+  group_by(MemberID) |>
+  mutate(
+    MaxBrShare = max(
+      Br57_144, Br55, Br272, Br286,
+      Br24, Br481, Br352, Br5
+    )
+  ) |>
+  ungroup()
+```
+
+This calculates a separate maximum for each household and retains all the original columns. `BrOthers` is deliberately excluded because it combines several brands. `ungroup()` removes the grouping before subsequent analysis.
+
+### 5. Check MaxBrShare and investigate zero values
+
+```{r}
+summary(BathSoap$MaxBrShare)
+
+BathSoap |>
+  summarise(
+    missing = sum(is.na(MaxBrShare)),
+    outside_0_1 = sum(MaxBrShare < 0 | MaxBrShare > 1)
+  )
+```
+
+The minimum is 0 and the maximum is 1. There are no missing values and no values outside this interval. The mean is approximately 0.3712 and the median is approximately 0.2995.
+
+```{r}
+BathSoap |>
+  filter(MaxBrShare == 0) |>
+  count(NoBrands, BrOthers) |>
+  gt()
+```
+
+There are **22 households with `MaxBrShare = 0`**. All 22 have `NoBrands = 1` and `BrOthers = 1`: each purchased only one brand, and that brand belongs to the pooled `BrOthers` category. Their shares for all eight named brands are zero, so excluding `BrOthers` produces a maximum of zero. These households are actually single-brand purchasers; their zero values should not be interpreted as an absence of brand loyalty.
+
+### 6. Recalculate the example distances using MaxBrShare
+
+Each household appears once in the example, so grouping by `Household` again gives a separate calculation for each row.
+
+```{r}
+brand_example <- brand_example |>
+  group_by(Household) |>
+  mutate(MaxBrShare = max(BrandA, BrandB)) |>
+  ungroup()
+
+brand_example |> gt()
+
+distance_max <- brand_example |>
+  select(MaxBrShare) |>
+  dist(method = "euclidean")
+
+distance_max
+```
+
+X and Y both have `MaxBrShare = 1`, while Z has `MaxBrShare = 0.5`. Only `MaxBrShare` is used in the second distance calculation.
+
+The comparison table below is generated directly from the two distance calculations. The entries of each distance object are ordered X-Y, X-Z, and Y-Z.
+
+```{r}
+#| label: tbl-distance-comparison
+#| tbl-cap: "Euclidean distances before and after changing the loyalty measure"
+tibble(
+  Pair = c("X and Y", "X and Z", "Y and Z"),
+  `Brand shares` = distance_shares[1:3],
+  MaxBrShare = distance_max[1:3]
+) |>
+  gt() |>
+  fmt_number(columns = c(`Brand shares`, MaxBrShare), decimals = 4)
+```
+
+X and Y now have distance zero and are the most similar pair, consistent with their equal loyalty. Z is equally distant from both because only half of its purchase volume goes to either brand. This resolves the brand-identity problem in the example: loyalty to different brands receives the same value when the largest purchase share is the same. The limitation concerning `BrOthers` in Item 5 still applies to the full dataset.
+
+`MaxBrShare` summarises concentration during the observed period; it does not describe the order of purchases or how often a household switches brands. Households with the same maximum can also distribute their remaining purchases differently, so this variable does not capture every aspect of loyalty.
+
+### 7. Why interpret MaxBrShare together with NoBrands?
+
+`MaxBrShare` measures concentration in the largest named brand, while `NoBrands` adds information about the breadth of brand purchasing that this maximum alone cannot show. Reading them together also prevents a household with `MaxBrShare = 0` and `NoBrands = 1` from being incorrectly labelled disloyal when its only brand is included in `BrOthers`.
