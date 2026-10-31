@@ -1,0 +1,411 @@
+---
+title: "Question 2"
+format: 
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: false
+    code-tools: true
+    embed-resources: true
+    number-sections: true
+  pdf:
+    toc: true
+    number-sections: true
+    include-in-header:
+      text: |
+        \usepackage{fvextra}
+        \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,commandchars=\\\{\}}
+editor: visual
+execute:
+  warning: false
+  message: false
+  echo: fenced
+---
+
+## Setup
+
+```{r}
+library(pacman)
+p_load(tidyverse, tidymodels, here, dendextend, factoextra, gt, psych)
+```
+
+## Load Data
+
+```{r}
+bath <- here("data/bathsoap.csv") |> read_csv()
+glimpse(bath)
+```
+
+## Question 2: Segmenting households by purchase behaviour
+
+### (a) Variable Selection
+
+The Key Problem defines purchase behaviour as volume, frequency, susceptibility to discounts, and brand loyalty. We selected one or more variables for each behaviour and excluded all the others.
+
+**Preparing MaxBrShare**
+
+Brand loyalty is measured partly by MaxBrShare: the largest share of a household's volume going to any one of the eight named brands, excluding BrOthers.
+
+```{r}
+bath <- bath |>
+  rowwise() |>
+  mutate(MaxBrShare = max(c_across(Br57_144:Br5))) |>
+  ungroup()
+
+summary(bath$MaxBrShare)
+sum(bath$MaxBrShare == 0)
+```
+
+**Summary of the candidate variables**
+
+```{r}
+bath |>
+  select(NoBrands, BrandRuns, TotalVol, NoTrans, Value, 
+         PurNoPromo, PurPromo6, PurOtherPromo,
+         MaxBrShare) |>
+  summary()
+```
+
+**Correlations between candidate variables**
+
+```{r}
+bath |>
+  select(TotalVol, Value, NoTrans, NoBrands, BrandRuns, PurNoPromo, MaxBrShare) |>
+  cor() |> round(2)
+```
+
+**Selected Variables**
+
++------------------------------+------------+------------------------------------------------------------------------------------------------------+
+| Behaviour                    | Variable   | Reason                                                                                               |
++==============================+============+======================================================================================================+
+| Volume                       | TotalVol   | - Measures the volume behaviour directly.                                                            |
++------------------------------+------------+------------------------------------------------------------------------------------------------------+
+| Frequency                    | NoTrans    | - Direct count of purchases.                                                                         |
++------------------------------+------------+------------------------------------------------------------------------------------------------------+
+| Discount susceptibility      | PurNoPromo | - The three promotion shares sum to 1, so PurNoPromo also gives the total share bought on promotion. |
+|                              |            |                                                                                                      |
+|                              |            | - PurNoPromo shows how much buying happens at full price.                                            |
++------------------------------+------------+------------------------------------------------------------------------------------------------------+
+| Brand loyalty: concentration | MaxBrShare | - A household buying 90% of its volume from one brand is more loyal than one spreading it evenly.    |
+|                              |            |                                                                                                      |
+|                              |            | - MaxBrShare captures this in one number.                                                            |
++------------------------------+------------+------------------------------------------------------------------------------------------------------+
+| Brand loyalty: variety       | NoBrands   | - Question 1 (item 7): MaxBrShare must be read together with NoBrands.                               |
+|                              |            |                                                                                                      |
+|                              |            | - The 22 households with MaxBrShare = 0 bought only BrOthers (NoBrands = 1), so they are loyal.      |
+|                              |            |                                                                                                      |
+|                              |            | - Only weakly related to MaxBrShare (-0.23), so it adds information that MaxBrShare does not.        |
++------------------------------+------------+------------------------------------------------------------------------------------------------------+
+| Brand loyalty: switching     | BrandRuns  | - The only variable that measures switching between brands.                                          |
+|                              |            |                                                                                                      |
+|                              |            | - Separates a household that stays with one brand for a long streak from one that keeps switching.   |
++------------------------------+------------+------------------------------------------------------------------------------------------------------+
+
+**Excluded Variables and Reasons**
+
+- **Value**: correlation with TotalVol is 0.88, so it is redundant. We kept TotalVol because volume is the behaviour named in the Key Problem.
+
+- **Brand share columns (Br57_144 to BrOthers)**: replaced by MaxBrShare. As shown in Question 1 (item 3), using all nine unchanged would make households that favour different brands look far apart even though they are equally loyal.
+
+- **Demographics (SEC, FEH, MT, SEX, AGE, EDU, HS, CHILD, CS, Affluence)**: these describe who the household is, not how it buys. The aim is to segment on behaviour and use demographics to profile the groups.
+
+- **Price categories (PrCat1 to PrCat4) and proposition categories (PropCat5 to PropCat15)**: these are the basis of purchase, not one of the four purchase behaviours defined in the brief.
+
+- **VolPerTrans, TransPerRun**: ratios of variables already included (TotalVol / NoTrans and NoTrans / BrandRuns), so they would count volume, frequency and switching twice.
+
+- **AvgPrice**: Value / TotalVol, the price level a household pays. Price level is not one of the four behaviours, and discount susceptibility is already measured directly by PurNoPromo.
+
+- **MemberID**: an identifier, not a behaviour. It is kept only to link the groups back to the demographics in part (e).
+
+- **PurPromo6, PurOtherPromo**: redundant with PurNoPromo, as above.
+
+**Limitation**
+
+BrandRuns correlates with NoTrans (0.77) and NoBrands (0.69). We kept all three because they measure different things (frequency, variety, switching), but the overlap means some information is shared.
+
+### (b) Data Preparation
+
+**Missing Values**
+
+```{r}
+seg_raw <- bath |>
+  select(MemberID, TotalVol, NoTrans, PurNoPromo, NoBrands, BrandRuns, MaxBrShare)
+
+colSums(is.na(seg_raw))
+```
+
+No missing values were found in the six selected variables, so no imputation or removal was needed. The 22 zeros in MaxBrShare are households that bought only BrOthers, so they are valid. The brief's "0 = not specified" code and the missing Affluence rule apply only to the demographic variables. These are not used to form the groups and are handled when profiling in part (e).
+
+**Skewness before transforming**
+
+```{r}
+#| label: fig-q2b-before
+#| fig-cap: "Histogram on the six selected variables before transformation"
+seg_raw |>
+  pivot_longer(-MemberID) |>
+  ggplot(aes(value)) +
+  geom_histogram(bins = 30) +
+  facet_wrap(~ name, scales = "free") +
+  labs(title = "Before Transformation")
+```
+
+Interpretation (@fig-q2b-before): TotalVol, NoTrans and BrandRuns are right-skewed with long tails, and PurNoPromo is strongly left-skewed with many households at 1. Skewed variables let a few extreme households dominate distance calculations, which would distort the clusters.
+
+**Choosing the transformation**
+
+The skewness coefficient (0 = symmetric) was compared for the raw data, a log transform and a square-root transform. PurNoPromo is flipped to 1 - PurNoPromo first, so that all skews point the same way.
+
+```{r}
+#| label: tbl-q2b-skew
+#| tbl-cap: "Skewness of each selected variable before and after transformation"
+seg_raw |>
+  mutate(PromoShare = 1 - PurNoPromo) |>
+  select(TotalVol, NoTrans, BrandRuns, PromoShare, NoBrands, MaxBrShare) |>
+  pivot_longer(everything(), names_to = "Variable") |>
+  group_by(Variable = fct_inorder(Variable)) |>
+  summarise(Raw           = skew(value),
+            Log           = if (all(value > 0)) skew(log(value)) else NA,
+            `Square root` = skew(sqrt(value))) |>
+  gt() |>
+  fmt_number(columns = -Variable, decimals = 2) |>
+  sub_missing(missing_text = "not possible (zeros)") |>
+  tab_footnote("PromoShare = 1 - PurNoPromo. Skewness from psych::skew().")
+```
+
+Interpretation (@tbl-q2b-skew): the log transform over-corrects TotalVol, NoTrans and BrandRuns. It turns their right skew into a stronger left skew, because it stretches out the few households with very small values. The square root brings all three close to symmetric, so it is used.
+
+**Transformation**
+
+```{r}
+seg <- seg_raw |>
+  transmute(
+    MemberID,
+    sqrt_TotalVol  = sqrt(TotalVol),
+    sqrt_NoTrans   = sqrt(NoTrans),
+    sqrt_BrandRuns = sqrt(BrandRuns),
+    NoBrands,
+    PromoShare     = sqrt(1 - PurNoPromo),
+    MaxBrShare
+  )
+```
+
+- **TotalVol, NoTrans, BrandRuns**: square root, because they are right-skewed counts and amounts and the square root makes them close to symmetric (@tbl-q2b-skew). A log transform was rejected because it creates a strong left skew.
+
+- **PurNoPromo**: flipped to 1 - PurNoPromo, which turns the left skew into a right skew. It is then square-rooted, because a log cannot handle the zeros this produces. A higher PromoShare now means more promotion-driven purchasing.
+
+- **NoBrands, MaxBrShare**: left unchanged. Both are only mildly skewed (0.52 and 0.66, below 1 in size); NoBrands is a small count and MaxBrShare is bounded between 0 and 1. After preparation, all six variables have a skewness below 1 in size.
+
+**Skewness after transforming**
+
+```{r}
+#| label: fig-q2b-after
+#| fig-cap: "Histogram on the six prepared variables after transformation"
+seg |>
+  pivot_longer(-MemberID) |>
+  ggplot(aes(value)) +
+  geom_histogram(bins = 30) +
+  facet_wrap(~ name, scales = "free") +
+  labs(title = "After Transformation")
+```
+
+Interpretation (@fig-q2b-after): after the square root, TotalVol, NoTrans and BrandRuns are close to symmetric (skewness between −0.16 and 0.15 in @tbl-q2b-skew). PromoShare keeps a spike at 0 for the `r scales::percent(mean(bath$PurNoPromo == 1))` of households that never buy on promotion. This is genuine behaviour rather than an error, so it is retained.
+
+**Standardisation**
+
+```{r}
+std_rec <- recipe(~ ., data = seg) |>
+  update_role(MemberID, new_role = "id") |>
+  step_normalize(all_numeric_predictors()) |>
+  prep()
+
+seg_std <- bake(std_rec, new_data = NULL) |> select(-MemberID)
+
+seg_std |>
+  pivot_longer(everything(), names_to = "Variable") |>
+  group_by(Variable) |>
+  summarise(Mean = round(mean(value), 3), SD = round(sd(value), 3))
+```
+
+The six variables are measured on very different scales: TotalVol is in the thousands, while MaxBrShare lies between 0 and 1. Distance-based clustering would let the large-scale variables dominate, so we standardised all six with a tidymodels recipe. `update_role()` keeps MemberID as an identifier so it is not standardised, and `step_normalize()` turns each variable into z-scores. After standardising, each variable has a mean of 0 and a standard deviation of 1, so they contribute equally to the distances.
+
+**Outliers**
+
+```{r}
+# values beyond 3 standard deviations, per variable
+colSums(abs(seg_std) > 3)
+
+# households flagged on at least one variable
+n_out <- sum(rowSums(abs(seg_std) > 3) > 0)
+n_out
+
+# direction: how many are low vs high
+colSums(seg_std < -3)
+colSums(seg_std > 3)
+```
+
+After standardising, we flagged values more than 3 standard deviations from the mean. In total, `r n_out` of the 600 households (`r scales::percent(n_out / 600, accuracy = 0.1)`) were flagged on at least one variable, and every flagged value lies at the high end: households that buy very large volumes, buy very often, switch or try many brands, or buy heavily on promotion. No household lies unusually far below the mean, and no outliers were found in MaxBrShare. (With a log transform, 22 households would have been flagged, 19 of them at the low end, which shows again that the log stretches out the very light buyers.) These households show genuine purchasing behaviour rather than data errors, and removing them would hide real heavy buyers, so we retained all 600 households.
+
+### (c) Method and Number of Groups
+
+**Choice of method**
+
+We used **hierarchical clustering with Ward's method** on the standardised, transformed variables from part (b).
+
+- Ward's method merges the pair of groups that increases within-group variance the least, so it produces compact groups.
+
+- It does not require the number of groups to be fixed in advance, and the dendrogram shows the whole hierarchy. K-means, in contrast, needs the number of groups chosen beforehand and depends on random starting points, so we use it only as a check.
+
+- With 600 households, the dendrogram is readable and the computation is quick.
+
+- All six variables are numeric and standardised, so Euclidean distance is appropriate.
+
+```{r}
+d <- dist(seg_std, method = "euclidean")
+hc <- hclust(d, method = "ward.D2")
+```
+
+**Why Ward's linkage rather than the other linkages**
+
+```{r}
+#| label: tbl-q2c-linkage
+#| tbl-cap: "Group sizes at k = 3 under each linkage method"
+tibble(Linkage = c("single", "complete", "average", "ward.D2")) |>
+  mutate(`Group sizes (k = 3)` = map_chr(Linkage, ~ hclust(d, method = .x) |>
+                                           cutree(k = 3) |>
+                                           table() |>
+                                           sort(decreasing = TRUE) |>
+                                           paste(collapse = " / "))) |>
+  gt()
+```
+
+Interpretation (@tbl-q2c-linkage): single and average linkage chain almost all households into one group and leave a few extreme households on their own, so their groups cannot be targeted. Complete linkage and Ward's method both give three sizeable groups. We prefer Ward's method because it builds groups by keeping the within-group variance as small as possible. This is the same quantity measured by the elbow plot and minimised by k-means, so the evidence for the number of groups and the k-means check below all judge the groups on the same basis.
+
+**Choosing the number of groups**
+
+The number of groups is not given by the data, so we used three pieces of evidence and checked whether they agree.
+
+**Evidence 1: Dendrogram**
+
+We look for the longest vertical gap between merges, because a long gap means two dissimilar groups were being joined.
+
+```{r}
+#| label: fig-q2c-dend
+#| fig-cap: "Dendrogram on Ward's method with the three groups coloured"
+dend <- as.dendrogram(hc)
+dend |> 
+  color_branches(k = 3) |> 
+  plot(leaflab = "none", main = "Ward's method, k = 3")
+abline(h = 26, col = "red", lty = 2)
+```
+
+```{r}
+# the six highest merge heights
+h <- round(sort(hc$height, decreasing = TRUE), 1)
+h[1:6]
+```
+
+Interpretation (@fig-q2c-dend): the largest gap, from `r h[1]` to `r h[2]`, gives two groups. The next-largest, from `r h[2]` to `r h[3]`, gives three groups (the red line). Below `r h[3]` the merges are close together (`r h[4]` and `r h[5]`), so there is no clear case for more than three groups.
+
+**Evidence 2: Elbow plot**
+
+The elbow plot shows total within-group variation for each k. We look for the point where adding another group stops reducing it much.
+
+```{r}
+#| label: fig-q2c-elbow
+#| fig-cap: "Line Chart on total within-group sum of squares by number of groups (elbow plot)"
+elbow <- fviz_nbclust(seg_std, FUN = hcut, hc_method = "ward.D2", method = "wss")
+elbow
+
+# within-group sum of squares at a given k, quoted in the text
+wss_k <- function(k) elbow$data$y[elbow$data$clusters == k]
+```
+
+Interpretation (@fig-q2c-elbow): within-group variation falls steeply from k = 1 to k = 2 and still clearly to k = 3 (from `r format(round(wss_k(1)), big.mark = ",")` to `r format(round(wss_k(2)), big.mark = ",")` to `r format(round(wss_k(3)), big.mark = ",")`), then declines gradually (`r format(round(wss_k(4)), big.mark = ",")` at k = 4 and `r format(round(wss_k(5)), big.mark = ",")` at k = 5). The bend is therefore at k = 2 to 3.
+
+**Evidence 3: Average silhouette width**
+
+The silhouette width measures how well each household fits its own group compared with the nearest other groups.
+
+```{r}
+#| label: fig-q2c-sil
+#| fig-cap: "Line Chart on average silhouette width by number of groups"
+sil <- fviz_nbclust(seg_std, FUN = hcut, hc_method = "ward.D2", method = "silhouette")
+sil
+
+# average silhouette width at a given k, quoted in the text
+sil_k <- function(k) round(sil$data$y[sil$data$clusters == k], 3)
+```
+
+**Note**: The silhouette width compares each household's distance to its own group with its distance to the nearest other group, so it requires at least two groups and is shown from k = 2.
+
+Interpretation (@fig-q2c-sil): the average silhouette width is highest at k = 2 (`r sil_k(2)`), slightly lower at k = 3 (`r sil_k(3)`), and then drops clearly at k = 4 (`r sil_k(4)`).
+
+**Two or three groups?**
+
+All three pieces of evidence favour two groups first and three groups a close second, and none supports more than three. The table below shows what the third group adds.
+
+```{r}
+table(`k = 2` = cutree(hc, k = 2), `k = 3` = cutree(hc, k = 3))
+```
+
+Going from two to three groups splits group 1 of the two-group solution into groups 1 and 3. The group means (@tbl-q2c-means) show that these are very different buyers: group 1 buys little and rarely, while group 3 buys the most volume and gives most of it to one brand. Two groups would merge light buyers with loyal heavy buyers, who need very different promotions, so two groups is too coarse for XYZ's purpose. We therefore choose **three groups**.
+
+**Group sizes**
+
+```{r}
+seg_cl <- seg |> mutate(cluster = factor(cutree(hc, k = 3)))
+
+table(seg_cl$cluster)
+```
+
+The three groups have `r paste(table(seg_cl$cluster), collapse = ", ")` households. The smallest group (`r min(table(seg_cl$cluster))` households, `r scales::percent(min(table(seg_cl$cluster)) / 600)`) is large enough to be a distinct segment that clients could target separately.
+
+**Where the outlier households fall**
+
+```{r}
+out_flag <- rowSums(abs(seg_std) > 3) > 0
+table(cluster = seg_cl$cluster, outlier = out_flag)
+```
+
+The `r n_out` outlier households identified in part (b) are spread over all three groups (`r paste(table(seg_cl$cluster[out_flag]), collapse = ", ")`), so no group is formed by extreme households alone.
+
+**Robustness check: k-means**
+
+As a check, we ran k-means with three groups and a fixed seed (34441) and compared it with the hierarchical solution.
+
+```{r}
+set.seed(34441)
+km <- kmeans(seg_std, centers = 3, nstart = 25)
+agree_tbl <- table(hierarchical = cutree(hc, k = 3), kmeans = km$cluster)
+agree_tbl
+
+# each hierarchical group's best match is a different k-means group,
+# so the row maxima count the households placed together by both methods
+agree <- sum(apply(agree_tbl, 1, max))
+```
+
+The group numbering differs between methods because cluster numbers are arbitrary, but each hierarchical group has one clear k-means match. Together, `r agree` of 600 households (`r scales::percent(agree / 600)`) are placed in the same group by both methods. The segmentation is therefore not an artefact of the algorithm.
+
+**Are the groups interpretable?**
+
+```{r}
+#| label: tbl-q2c-means
+#| tbl-cap: "Group means of the six prepared variables"
+seg_cl |>
+  select(-MemberID) |>
+  group_by(cluster) |>
+  summarise(n = n(), across(everything(), mean)) |>
+  gt() |>
+  fmt_number(columns = -c(cluster, n), decimals = 2) |>
+  tab_spanner(label = "Square-root scale",
+              columns = c(sqrt_TotalVol, sqrt_NoTrans, sqrt_BrandRuns)) |>
+  cols_label(cluster = "Group", sqrt_TotalVol = "TotalVol",
+             sqrt_NoTrans = "NoTrans", sqrt_BrandRuns = "BrandRuns")
+```
+
+Interpretation (@tbl-q2c-means): these are the group means of the prepared variables (TotalVol, NoTrans and BrandRuns are on the square-root scale). The groups differ clearly in volume, frequency, number of brands, switching, promotion use and brand share, so three groups give a meaningful segmentation, which is described in the original units in part (d).
+
+**Conclusion**
+
+We chose **three groups** from Ward's hierarchical clustering. The dendrogram, elbow plot and silhouette width all favour two groups first and three a close second, and none supports more than three; the third group separates light buyers from loyal heavy buyers, which matters for targeting promotions. The k-means check agreed with the hierarchical solution for `r scales::percent(agree / 600)` of households. The average silhouette width of about `r round(sil_k(3), 2)` at k = 3 is modest, which means the groups overlap somewhat. This is common for purchase-behaviour data, so the segments should be read as a useful partition of a continuous range of behaviour rather than sharply separated clusters.
