@@ -68,7 +68,7 @@ We use **principal component analysis (PCA)**. PCA replaces a set of correlated 
 - Several of them overlap strongly (see the correlations below), so they share information that fewer dimensions can carry.
 - The aim is to summarise the variables, not to predict an outcome.
 
-We apply PCA to the **same six prepared variables as Question 2(b)**: the square roots of TotalVol, NoTrans and BrandRuns, the square-root promotion share, NoBrands and MaxBrShare. The square root matters here too. PCA is built on correlations, and correlations are sensitive to skew and extreme values, so the transformation chosen in Question 2(b) also keeps a few extreme households from distorting the components. Using the same data also means the components describe the same behaviour as the groups, and the two analyses can be compared in @sec-q3-clusters.
+We apply PCA to the **same six prepared variables as Question 2(b)**: the square roots of TotalVol, NoTrans and BrandRuns, the square-root promotion share, NoBrands and MaxBrShare. The square root matters here too. PCA is built on correlations, and correlations are sensitive to skew and extreme values, so the transformation chosen in Question 2(b) also keeps a few extreme households from distorting the components. Using the same data also means the components describe the same behaviour as the groups, and the two analyses can be compared in the last part of this question ([Linking the components to the Question 2 groups](#sec-q3-clusters)).
 
 ### Are the variables correlated enough to reduce?
 
@@ -105,6 +105,7 @@ We build the PCA as a tidymodels recipe.
 - `update_role()` keeps `MemberID` as an identifier, so it is carried along but not analysed.
 - `step_normalize()` standardises each variable to a mean of 0 and a standard deviation of 1. Without this, the variables with the largest variance (sqrt_TotalVol, still in the tens and hundreds) would dominate the first component simply because of their units.
 - `step_pca()` then extracts the components.
+- The sign of a component is arbitrary and can flip between computers, so the code fixes it: PC1 is made positive on sqrt_BrandRuns and PC2 positive on MaxBrShare. This changes no result, only the direction in which each component is read, and keeps the text below in line with the output.
 
 ```{r}
 #| label: q3-pca
@@ -114,7 +115,14 @@ pca_rec <- recipe(~ ., data = seg) |>
   step_pca(all_numeric_predictors(), id = "pca") |>
   prep()
 
-pca_scores <- bake(pca_rec, new_data = NULL)
+# fix the signs: PC1 positive on sqrt_BrandRuns, PC2 positive on MaxBrShare
+anchor <- c(PC1 = "sqrt_BrandRuns", PC2 = "MaxBrShare")
+pca_sign <- tidy(pca_rec, id = "pca", type = "coef") |>
+  filter(terms == anchor[component]) |>
+  transmute(component, flip = sign(value))
+
+pca_scores <- bake(pca_rec, new_data = NULL) |>
+  mutate(across(c(PC1, PC2), ~ .x * pca_sign$flip[pca_sign$component == cur_column()]))
 ```
 
 ### How many components to retain?
@@ -140,7 +148,7 @@ pca_var |>
 
 ```{r}
 #| label: fig-q3-scree
-#| fig-cap: "Scree plot: eigenvalue of each component, with the eigenvalue = 1 cut-off"
+#| fig-cap: "Scree Plot on the eigenvalue of each component, with the eigenvalue = 1 cut-off"
 pca_var |>
   ggplot(aes(x = factor(component), y = eigenvalue)) +
   geom_col(fill = "steelblue") +
@@ -158,11 +166,11 @@ cum  <- pca_var$cumulative_pct
 cum2 <- cum[2]
 ```
 
-We retain **two components**, because three criteria agree.
+We retain **two components**. The first two criteria below both point to two components, and the scree plot is consistent with them.
 
-1.  **Eigenvalue greater than 1 (Kaiser criterion).** After standardisation, each original variable has a variance of 1, so a component with an eigenvalue below 1 explains less than a single variable does. Only PC1 (`r round(eig[1], 2)`) and PC2 (`r round(eig[2], 2)`) pass. PC3 is below the cut-off (`r round(eig[3], 2)`).
-2.  **Cumulative variance (@tbl-q3-variance).** Two components explain `r round(cum2, 1)`% of the total variance. This is above the 60% that is generally regarded as adequate in social-science data. Reaching the 95% expected in the natural sciences would require `r which(cum >= 95)[1]` of the six components, which would barely reduce the data.
-3.  **Scree plot (@fig-q3-scree).** The eigenvalues drop sharply from PC1 to PC2 and then level off, so the "elbow" is at the second component. Each later component adds little.
+1. **Eigenvalue greater than 1 (Kaiser criterion).** After standardisation, each original variable has a variance of 1, so a component with an eigenvalue below 1 explains less than a single variable does. Only PC1 (`r round(eig[1], 2)`) and PC2 (`r round(eig[2], 2)`) pass. PC3 is below the cut-off (`r round(eig[3], 2)`).
+2. **Cumulative variance (@tbl-q3-variance).** Two components explain `r round(cum2, 1)`% of the total variance. This is above the 60% that is generally regarded as adequate in social-science data. Reaching the 95% expected in the natural sciences would require `r which(cum >= 95)[1]` of the six components, which would barely reduce the data.
+3. **Scree plot (@fig-q3-scree).** The largest drop is from PC1 to PC2 (`r round(eig[1], 2)` to `r round(eig[2], 2)`). After PC2 the eigenvalues fall more slowly (`r round(eig[3], 2)`, then `r round(eig[4], 2)`) and all lie below the eigenvalue = 1 line. The plot alone is not decisive, because there is a second drop at PC5, so it is used only to support the first two criteria.
 
 PC3 is also dominated by a single variable: PromoShare has the largest coefficient on it by far (@tbl-q3-coef). A component that mostly repeats one variable does not summarise several variables, so dropping it loses little that is not already visible in PromoShare itself.
 
@@ -174,6 +182,8 @@ PC3 is also dominated by a single variable: PromoShare has the largest coefficie
 #| label: tbl-q3-coef
 #| tbl-cap: "Component coefficients (weights) for the first three components"
 pca_loadings <- tidy(pca_rec, id = "pca", type = "coef") |>
+  left_join(pca_sign, by = "component") |>
+  mutate(value = value * coalesce(flip, 1)) |>
   left_join(tidy(pca_rec, id = "pca", type = "variance") |>
               filter(terms == "variance") |>
               transmute(component = paste0("PC", component),
@@ -210,7 +220,7 @@ ld <- function(v, col) round(loading_wide[[col]][loading_wide$terms == v], 2)
 
 ```{r}
 #| label: fig-q3-loadings
-#| fig-cap: "Loadings of the six variables on the two retained components"
+#| fig-cap: "Bar Chart on the loadings of the six variables on the two retained components"
 pca_loadings |>
   filter(component %in% c("PC1", "PC2")) |>
   ggplot(aes(x = loading, y = fct_reorder(terms, loading), fill = loading > 0)) +
@@ -233,23 +243,23 @@ The two components therefore summarise volume, frequency and switching well, but
 
 **PC1: Purchase frequency and brand switching**
 
-PC1 has strong positive loadings on sqrt_BrandRuns (`r ld("sqrt_BrandRuns", "PC1")`), sqrt_NoTrans (`r ld("sqrt_NoTrans", "PC1")`) and NoBrands (`r ld("NoBrands", "PC1")`). It has a moderate positive loading on sqrt_TotalVol (`r ld("sqrt_TotalVol", "PC1")`) and a moderate negative loading on MaxBrShare (`r ld("MaxBrShare", "PC1")`).
+PC1 (@tbl-q3-loadings, @fig-q3-loadings) has strong positive loadings on sqrt_BrandRuns (`r ld("sqrt_BrandRuns", "PC1")`), sqrt_NoTrans (`r ld("sqrt_NoTrans", "PC1")`) and NoBrands (`r ld("NoBrands", "PC1")`). It has a moderate positive loading on sqrt_TotalVol (`r ld("sqrt_TotalVol", "PC1")`) and a moderate negative loading on MaxBrShare (`r ld("MaxBrShare", "PC1")`).
 
 - A household with a **high** PC1 score buys often, uses many brands and switches between them frequently.
 - A household with a **low** score buys rarely and sticks to fewer brands.
 
 PC1 is the dominant dimension, explaining about half of all variation. It shows that, in this market, the households that buy most often are also the ones that switch brands most. Volume loads only moderately on PC1 because it is split between the two components.
 
-**PC2: Deal-seeking versus loyal bulk buying**
+**PC2: Loyal bulk buying versus small, mixed buying**
 
-PC2 contrasts PromoShare (`r ld("PromoShare", "PC2")`) with sqrt_TotalVol (`r ld("sqrt_TotalVol", "PC2")`) and MaxBrShare (`r ld("MaxBrShare", "PC2")`). Frequency, switching and number of brands load only weakly on PC2 (all below 0.3 in size), so PC2 is largely independent of how often a household shops or switches.
+PC2 is defined mainly by its two largest loadings, sqrt_TotalVol (`r ld("sqrt_TotalVol", "PC2")`) and MaxBrShare (`r ld("MaxBrShare", "PC2")`). PromoShare (`r ld("PromoShare", "PC2")`) loads in the opposite direction but is third in size, so promotions are a secondary part of this component. Frequency, switching and number of brands load only weakly on PC2 (all below 0.3 in size), so PC2 is largely independent of how often a household shops or switches.
 
-- A **positive** score marks a household that buys a lot on promotion, buys a smaller volume and has no dominant brand.
-- A **negative** score marks a household that buys in large quantities, concentrates that volume on one brand and rarely relies on promotions.
+- A **positive** score marks a household that buys in large quantities, concentrates that volume on one brand and relies less on promotions.
+- A **negative** score marks a household that buys a smaller volume, spreads it across brands with no dominant one and tends to buy more on promotion.
 
-The sign of a component is arbitrary: reversing every loading would describe the same dimension. We read PC2 from the positive (deal-seeking) end because that is the behaviour most relevant to targeting promotions.
+The sign of a component is arbitrary: reversing every loading would describe the same dimension. The code fixes PC2 so that a positive score means loyal bulk buying, the behaviour of the households most valuable to a single brand.
 
-The two components are **uncorrelated by construction**, so they describe separate aspects of behaviour. PC1 is how often a household buys and switches. PC2 is whether its buying is driven by deals or by large, loyal purchases of one brand.
+The two components are **uncorrelated by construction**, so they describe separate aspects of behaviour. PC1 is how often a household buys and switches. PC2 is whether it buys large volumes of one brand or smaller, mixed purchases.
 
 ### Rotation check
 
@@ -279,15 +289,15 @@ rl <- function(v, col) round(rot_wide[[col]][rot_wide$Variable == v], 2)
 Interpretation (@tbl-q3-varimax): after rotation, the two dimensions separate more cleanly.
 
 - **RC1** is defined by sqrt_NoTrans (`r rl("sqrt_NoTrans", "RC1")`) and sqrt_TotalVol (`r rl("sqrt_TotalVol", "RC1")`), with sqrt_BrandRuns (`r rl("sqrt_BrandRuns", "RC1")`) and NoBrands (`r rl("NoBrands", "RC1")`): **purchase intensity**.
-- **RC2** contrasts MaxBrShare (`r rl("MaxBrShare", "RC2")`) with PromoShare (`r rl("PromoShare", "RC2")`) and sqrt_BrandRuns (`r rl("sqrt_BrandRuns", "RC2")`): **disloyalty and deal-seeking**.
+- **RC2** contrasts MaxBrShare (`r rl("MaxBrShare", "RC2")`) with PromoShare (`r rl("PromoShare", "RC2")`) and sqrt_BrandRuns (`r rl("sqrt_BrandRuns", "RC2")`): **brand loyalty versus deal-seeking**.
 
-Rotation changes neither the total variance explained (`r round(cum2, 1)`%) nor the number of components. It confirms the same two themes as the unrotated solution: how much and how often a household buys, and how loyal or deal-driven it is. We therefore keep the unrotated names above.
+Rotation changes neither the total variance explained (`r round(cum2, 1)`%) nor the number of components, but it divides the variables differently: sqrt_TotalVol moves onto RC1 (`r rl("sqrt_TotalVol", "RC1")`), and part of the switching moves onto RC2 (sqrt_BrandRuns `r rl("sqrt_BrandRuns", "RC2")`). Both solutions show the same two broad themes, purchase activity and brand loyalty, but the rotated one groups volume with activity rather than with loyalty, and gives promotions a larger role in the loyalty dimension. We keep the unrotated components because they are the ones `step_pca()` returns and whose scores are compared with the Question 2 groups below; the rotation is used only as a check on their names.
 
 ### Linking the components to the Question 2 groups {#sec-q3-clusters}
 
 ```{r}
 #| label: fig-q3-scores
-#| fig-cap: "Household scores on PC1 and PC2, coloured by the Question 2 group"
+#| fig-cap: "Scatter Plot on household scores on PC1 and PC2, coloured by the Question 2 group"
 pca_scores |>
   left_join(seg_cl |> select(MemberID, cluster), by = "MemberID") |>
   ggplot(aes(PC1, PC2, colour = cluster)) +
@@ -295,7 +305,7 @@ pca_scores |>
   geom_hline(yintercept = 0, linetype = "dotted") +
   geom_vline(xintercept = 0, linetype = "dotted") +
   labs(x = "PC1: purchase frequency and brand switching",
-       y = "PC2: deal-seeking vs loyal bulk buying",
+       y = "PC2: loyal bulk vs small, mixed buying",
        colour = "Group")
 ```
 
@@ -313,14 +323,14 @@ group_pc |>
   cols_label(cluster = "Group")
 
 # mean score of one group, quoted in the text
-gm <- function(g, col) round(group_pc[[col]][group_pc$cluster == g], 2)
+pc_gm <- function(g, col) round(group_pc[[col]][group_pc$cluster == g], 2)
 ```
 
 Interpretation (@fig-q3-scores, @tbl-q3-group-means): the three groups from Question 2 occupy different parts of the PC1–PC2 plane.
 
-- **Group 1** lies far to the left on PC1 (`r gm(1, "PC1")`) and above average on PC2 (`r gm(1, "PC2")`). These households buy rarely and in small volumes, with no strongly dominant brand.
-- **Group 2** lies on the right of PC1 (`r gm(2, "PC1")`) and slightly above average on PC2 (`r gm(2, "PC2")`). These are frequent buyers who switch between many brands and use promotions more.
-- **Group 3** is slightly below average on PC1 (`r gm(3, "PC1")`) but has the lowest PC2 score (`r gm(3, "PC2")`). These are the loyal bulk buyers: large volumes concentrated on one brand.
+- **Group 1 (Light buyers)** lies far to the left on PC1 (`r pc_gm(1, "PC1")`) and below average on PC2 (`r pc_gm(1, "PC2")`). These households buy rarely and in small volumes. Their low PC2 score comes from their small volume, not from promotions: Question 2(d) showed that they rarely buy on promotion. This is why promotions are treated as only a secondary part of PC2.
+- **Group 2 (Active brand switchers)** lies on the right of PC1 (`r pc_gm(2, "PC1")`) and slightly below average on PC2 (`r pc_gm(2, "PC2")`). These are frequent buyers who switch between many brands, with no dominant brand, and use promotions more.
+- **Group 3 (Loyal value buyers)** is slightly below average on PC1 (`r pc_gm(3, "PC1")`) but has by far the highest PC2 score (`r pc_gm(3, "PC2")`). These households buy large volumes concentrated on one brand.
 
 PC2 is what separates Groups 1 and 3. Both are below average on PC1, so a single "activity" dimension would put them together, which is what happened in the two-group solution in Question 2(c). PC2 shows that they differ in volume and loyalty. This supports the choice of three groups. The two components reproduce the main differences found by clustering, using only two dimensions instead of six.
 
@@ -329,6 +339,6 @@ PC2 is what separates Groups 1 and 3. Both are below average on PC1, so a single
 PCA reduces the six purchase-behaviour variables to two uncorrelated components that explain `r round(cum2, 1)`% of the variation:
 
 - **PC1, purchase frequency and brand switching**: how often and how widely a household buys.
-- **PC2, deal-seeking versus loyal bulk buying**: whether its purchases are driven by promotions or are large and concentrated on one brand.
+- **PC2, loyal bulk buying versus small, mixed buying**: whether a household buys large volumes concentrated on one brand, or smaller volumes spread across brands and bought more on promotion.
 
-The main limitation is that about `r round(100 - cum2, 1)`% of the variation is not retained. Most of what is lost concerns promotion behaviour (PromoShare has the lowest communality), so analyses focused specifically on promotions should still use PromoShare directly.
+The main limitation is that about `r round(100 - cum2, 1)`% of the variation is not retained. The largest single loss is in promotion behaviour (PromoShare has the lowest communality, `r ld("PromoShare", "communality")`), so analyses focused specifically on promotions should still use PromoShare directly.
